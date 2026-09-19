@@ -1,21 +1,33 @@
 # Biomass Weighbridge Prototype
 
-Minimal end-to-end prototype for factory biomass inspection.
+Minimal end-to-end prototype for a factory weighbridge inspection workflow.
 
-## Included
+## What is implemented
 
-- React/Vite frontend for uploading up to 5 images.
-- Express backend with multipart upload validation.
-- Mock Gemini mode enabled by default.
-- Optional live Gemini REST API integration.
-- PostgreSQL schema for supplier, image reference, AI JSON, and delayed lab results.
-- Resilience guidance for interrupted mobile uploads.
+- React/Vite mobile-friendly upload UI supporting up to 5 images.
+- Browser-side validation for image type/count/size.
+- Express backend with server-side multipart validation.
+- Gemini API key stays only on the backend in `backend/.env`.
+- Gemini call uses a dedicated system instruction and JSON response mode.
+- Mock Gemini mode works without external credentials.
+- PostgreSQL schema and backend persistence for supplier, images, AI response, predictions and delayed lab results.
+- Health endpoint reports application and database availability.
+- README documents the production strategy for interrupted 15MB mobile uploads.
 
-## Run locally
+## Local setup
 
-Requirements: Node.js 18+.
+Requirements: Node.js 18+ and PostgreSQL.
 
-Terminal 1:
+### 1. Database
+
+Create a PostgreSQL database, for example:
+
+```bash
+createdb biomass_weighbridge
+psql biomass_weighbridge < database/schema.sql
+```
+
+### 2. Backend
 
 ```bash
 cd backend
@@ -24,7 +36,22 @@ npm install
 npm start
 ```
 
-Terminal 2:
+Set `DATABASE_URL` in `backend/.env`. For a no-key local demo, keep:
+
+```env
+USE_MOCK_GEMINI=true
+```
+
+For real Gemini:
+
+```env
+USE_MOCK_GEMINI=false
+GEMINI_API_KEY=your_key
+```
+
+The key is never included in frontend code, browser storage, or API responses.
+
+### 3. Frontend
 
 ```bash
 cd frontend
@@ -32,48 +59,74 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5173, select one or more images, and click **Analyze Images**.
-
-The default backend mode is mock mode, so no Gemini key is needed:
-
-```env
-USE_MOCK_GEMINI=true
-```
-
-For live Gemini, set `USE_MOCK_GEMINI=false` and provide `GEMINI_API_KEY` in `backend/.env`. The key is never sent to the browser.
+Open http://localhost:5173.
 
 ## API
 
-`POST /api/analyze` accepts multipart form data:
+### `GET /api/health`
 
-- `images`: up to 5 image files
-- `supplierId`: supplier identifier
-- `captureId`: optional idempotency/capture identifier
+Returns backend and database health.
 
-`GET /api/health` checks backend availability.
+### `POST /api/analyze`
 
-## Example mock response
+Multipart form data:
 
-```json
-{
-  "message": "Analysis complete",
-  "supplierId": "SUP-1024",
-  "result": {
-    "moisture_pct": 20.5,
-    "ash_pct": 7.3,
-    "foreign_stones_present": false,
-    "confidence": 0.92,
-    "model": "mock"
-  }
-}
+- `images`: 1–5 image files
+- `supplierId`: required supplier identifier
+- `captureId`: optional UUID used as an idempotency/correlation identifier
+
+Response contains:
+
+- moisture percentage
+- ash percentage
+- foreign-stone detection
+- confidence
+- model name
+- persisted inspection ID when PostgreSQL is configured
+
+## Architecture
+
+```text
+Mobile browser
+    |
+    | HTTPS multipart upload
+    v
+Node/Express API
+    |-- validate files + metadata
+    |-- persist inspection
+    |-- build server-side Gemini request
+    v
+Google Gemini API
+    |
+    v
+AI JSON result
+    |
+    +--> PostgreSQL
+    |     supplier + image refs + raw AI JSON
+    |     + delayed physical lab result
+    |
+    +--> API response --> Mobile browser
 ```
 
-## Resilience for a 15MB upload on an unstable network
+## 15MB upload on unstable 3G/4G/5G
 
-The current prototype rejects incomplete requests safely and does not analyze until all multipart files arrive. For production, the client should split files into chunks and retry them using a stable `captureId` and chunk number. The backend should persist upload status, support byte-range resume, use idempotency keys, and finalize the inspection only after every chunk is present. Temporary files should be stored in object storage, and a queue should perform analysis after finalization. This prevents partial uploads, duplicate analysis, and lost work when 3G/4G/5G drops.
+The prototype deliberately does **not** analyze until the complete multipart request has arrived. A dropped connection therefore produces no partial AI result.
 
-## Database
+For production, the upload should move to a resumable object-storage flow:
 
-Apply `database/schema.sql` to PostgreSQL. The `physical_lab_result` JSONB field is intentionally nullable so delayed lab measurements can later be compared with AI predictions for calibration.
+1. Browser requests an upload session and receives a stable `captureId`.
+2. Each photo is uploaded in resumable chunks with `Content-Range`/chunk numbers and a checksum.
+3. The backend/object store records received chunks and lets the browser retry only the missing ranges after reconnecting.
+4. Once all 5 files are complete, the backend verifies checksums, marks the capture finalized, and enqueues analysis.
+5. A worker calls Gemini with server-side credentials and writes the result using `captureId` as an idempotency key.
+6. The UI polls or receives a push update for completion.
 
-This is a functional prototype, not a production deployment; authentication, object storage, resumable uploads, rate limiting, and a background queue should be added before deployment.
+This avoids restarting a 15MB upload after every network interruption, prevents duplicate analyses, and keeps incomplete captures from entering the AI pipeline.
+
+For a production deployment I would use object storage (such as Google Cloud Storage) with resumable uploads, a queue/worker, request authentication, rate limiting, malware/content validation, structured logging, retries with backoff, and encrypted storage.
+
+## Database and delayed lab calibration
+
+`biomass_inspections.physical_lab_result` is nullable because laboratory measurements arrive later. When the lab result arrives, store it with `lab_result_received_at`; offline jobs can then compare the AI prediction against the physical result to measure drift and calibrate future models.
+
+This repository is intentionally lightweight for the interview exercise; deployment infrastructure and authentication are described but not required for the local prototype.
