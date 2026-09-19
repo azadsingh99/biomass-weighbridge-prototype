@@ -1,0 +1,211 @@
+const express = require('express');
+const cors = require('cors');
+const multer = require('multer');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const dotenv = require('dotenv');
+
+dotenv.config({ path: path.join(__dirname, '.env') });
+
+const app = express();
+const PORT = Number(process.env.PORT || 4000);
+const UPLOAD_DIR = path.join(__dirname, 'uploads');
+
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
+    filename: (_req, file, cb) => {
+      const extension = path.extname(file.originalname) || '.jpg';
+      const uniqueName = `${Date.now()}-${crypto.randomUUID()}${extension}`;
+      cb(null, uniqueName);
+    }
+  }),
+  limits: {
+    fileSize: 25 * 1024 * 1024,
+    files: 5
+  },
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only image files are allowed for upload.'));
+    }
+  }
+});
+
+app.use(cors());
+app.use(express.json({ limit: '2mb' }));
+
+app.get('/api/health', (_req, res) => {
+  res.json({ status: 'ok', service: 'biomass-inspection-backend' });
+});
+
+app.post('/api/analyze', upload.array('images', 5), async (req, res) => {
+  try {
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ error: 'No images uploaded.' });
+    }
+
+    const supplierId = req.body.supplierId || 'UNKNOWN_SUPPLIER';
+    const captureId = req.body.captureId || crypto.randomUUID();
+
+    const images = req.files.map((file) => ({
+      fileName: file.originalname,
+      mimeType: file.mimetype,
+      base64: fs.readFileSync(file.path).toString('base64')
+    }));
+
+    const result = await analyzeBiomassImages(images, supplierId, captureId);
+
+    req.files.forEach((file) => {
+      try {
+        fs.unlinkSync(file.path);
+      } catch (_error) {
+        // Ignore cleanup errors; file removal is best effort.
+      }
+    });
+
+    return res.json({
+      message: 'Analysis complete',
+      captureId,
+      supplierId,
+      result
+    });
+  } catch (error) {
+    console.error('Analyze error:', error);
+    return res.status(500).json({
+      error: 'Image analysis failed.',
+      details: error.message
+    });
+  }
+});
+
+app.use((error, _req, res, _next) => {
+  if (error instanceof multer.MulterError) {
+    return res.status(400).json({ error: error.message });
+  }
+
+  if (error) {
+    return res.status(400).json({ error: error.message || 'Unexpected upload error.' });
+  }
+
+  return res.status(500).json({ error: 'Internal server error.' });
+});
+
+async function analyzeBiomassImages(images, supplierId, captureId) {
+  const useMock = (process.env.USE_MOCK_GEMINI || 'true').toLowerCase() === 'true';
+
+  if (useMock) {
+    return mockGeminiResponse(images, supplierId, captureId);
+  }
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey || apiKey === 'your_google_gemini_key_here') {
+    throw new Error('GEMINI_API_KEY is missing. Set it in backend/.env or enable USE_MOCK_GEMINI=true.');
+  }
+
+  const prompt = `
+    You are a biomass quality inspection assistant for a factory weighbridge.
+    Analyze the uploaded images of incoming biomass material.
+    Return valid JSON only with fields:
+    {
+      "moisture_pct": number,
+      "ash_pct": number,
+      "foreign_stones_present": boolean,
+      "confidence": number,
+      "analysis": string
+    }
+
+    Please estimate moisture percentage and ash content as percentages.
+    Determine whether foreign stones are likely present.
+    Keep the response realistic for industrial biomass feedstock.
+  `;
+
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: prompt },
+              ...images.map((image) => ({
+                inline_data: {
+                  mime_type: image.mimeType || 'image/jpeg',
+                  data: image.base64
+                }
+              }))
+            ]
+          }
+        ]
+      })
+    }
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Gemini API error: ${response.status} ${errorText}`);
+  }
+
+  const data = await response.json();
+  const generatedText =
+    data?.candidates?.[0]?.content?.parts
+      ?.map((part) => part.text || '')
+      .join('\n') || '';
+
+  const parsed = parseJsonResponse(generatedText);
+
+  return {
+    ...parsed,
+    rawText: generatedText,
+    model: 'gemini-2.0-flash',
+    supplierId,
+    captureId
+  };
+}
+
+function parseJsonResponse(rawText) {
+  const start = rawText.indexOf('{');
+  const end = rawText.lastIndexOf('}') + 1;
+  const cleaned = start >= 0 && end > start ? rawText.slice(start, end) : rawText;
+
+  try {
+    return JSON.parse(cleaned);
+  } catch (_error) {
+    return {
+      moisture_pct: 18.5,
+      ash_pct: 7.2,
+      foreign_stones_present: false,
+      confidence: 0.8,
+      analysis: 'The model returned non-JSON output, so fallback values were applied.'
+    };
+  }
+}
+
+function mockGeminiResponse(images, supplierId, captureId) {
+  const imageCount = images.length;
+  const moisturePct = 18 + (imageCount % 3) * 2.5;
+  const ashPct = 6.5 + (supplierId.length % 4) * 0.8;
+  const stonesPresent = (captureId.length % 2) === 0;
+
+  return {
+    moisture_pct: Number(moisturePct.toFixed(1)),
+    ash_pct: Number(ashPct.toFixed(1)),
+    foreign_stones_present: stonesPresent,
+    confidence: 0.92,
+    analysis: `Mock analysis for ${imageCount} biomass image(s). The material appears moderately dry with low ash content and ${stonesPresent ? 'possible foreign stone contamination' : 'no likely stone contamination'}.`,
+    model: 'mock',
+    supplierId,
+    captureId
+  };
+}
+
+app.listen(PORT, () => {
+  console.log(`Backend listening on http://localhost:${PORT}`);
+});

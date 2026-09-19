@@ -1,0 +1,47 @@
+-- PostgreSQL schema for biomass inspection workflow
+
+CREATE TABLE IF NOT EXISTS suppliers (
+    id SERIAL PRIMARY KEY,
+    supplier_id VARCHAR(100) UNIQUE NOT NULL,
+    supplier_name VARCHAR(255),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS biomass_inspections (
+    id SERIAL PRIMARY KEY,
+    supplier_id VARCHAR(100) NOT NULL,
+    capture_id UUID NOT NULL,
+    image_reference TEXT NOT NULL,
+    api_response JSONB NOT NULL,
+    moisture_pct NUMERIC(5,2),
+    ash_pct NUMERIC(5,2),
+    foreign_stones_present BOOLEAN,
+    captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    physical_lab_result JSONB,
+    lab_result_received_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT fk_supplier
+        FOREIGN KEY (supplier_id)
+        REFERENCES suppliers (supplier_id)
+        ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_biomass_inspections_supplier_id
+    ON biomass_inspections (supplier_id);
+
+CREATE INDEX IF NOT EXISTS idx_biomass_inspections_capture_id
+    ON biomass_inspections (capture_id);
+
+CREATE INDEX IF NOT EXISTS idx_biomass_inspections_created_at
+    ON biomass_inspections (created_at DESC);
+
+-- Example later calibration data for lab validation
+-- The physical_lab_result JSONB can store lab results received after the AI pass.
+-- Example:
+-- {
+--   "lab_moisture_pct": 19.4,
+--   "lab_ash_pct": 6.9,
+--   "lab_total_minerals_pct": 2.2,
+--   "stone_count": 0,
+--   "sample_batch": "BATCH-2047"
+-- }
