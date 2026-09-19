@@ -16,6 +16,7 @@ const uploadDir = path.join(__dirname, 'uploads');
 fs.mkdirSync(uploadDir, { recursive: true });
 
 const pool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL }) : null;
+const corsOrigin = process.env.CORS_ORIGIN || 'http://localhost:5173';
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -26,7 +27,7 @@ const upload = multer({
   fileFilter: (_req, file, cb) => cb(null, /^image\\/(jpeg|png|webp|heic|heif)$/.test(file.mimetype))
 });
 
-app.use(cors());
+app.use(cors({ origin: corsOrigin }));
 app.get('/api/health', async (_req, res) => {
   let database = 'not_configured';
   if (pool) {
@@ -77,7 +78,7 @@ app.post('/api/analyze', upload.array('images', 5), async (req, res) => {
     });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: 'Image analysis failed.', details: error.message });
+    res.status(500).json({ error: 'Image analysis failed.' });
   } finally {
     files.forEach((file) => fs.rm(file.path, { force: true }, () => {}));
   }
