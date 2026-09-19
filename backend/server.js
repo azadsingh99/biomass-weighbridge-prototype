@@ -97,8 +97,8 @@ async function persistInspection({ supplierId, captureId, imageReference, result
   const { rows } = await pool.query(
     `INSERT INTO biomass_inspections
       (supplier_id, capture_id, image_reference, api_response,
-       moisture_pct, ash_pct, foreign_stones_present)
-     VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)
+       moisture_pct, ash_pct, foreign_stones_present, ai_confidence, model_name)
+     VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9)
      RETURNING id`,
     [
       supplierId,
@@ -107,7 +107,9 @@ async function persistInspection({ supplierId, captureId, imageReference, result
       JSON.stringify(result),
       result.moisture_pct ?? null,
       result.ash_pct ?? null,
-      result.foreign_stones_present ?? null
+      result.foreign_stones_present ?? null,
+      result.confidence ?? null,
+      result.model ?? null
     ]
   );
 
